@@ -122,8 +122,8 @@ class Importer(importer.ImporterProtocol):
                 acc = self.account_cash
             if sheet.row(ii)[1].value[:6] == '1.1.2.':
                 acc = self.account_currencyexchange
-            if re.match(r'^Остаток денежных средств на конец периода \(', sheet.row(ii)[1].value):
-                
+            if (self.stmt_begin < datetime.date(2018, 11, 1) and 
+                    re.match(r'^Остаток денежных средств на конец периода \(', sheet.row(ii)[1].value)):
                 balance_currency = fix_currency(re.search(r'\(.*\)', sheet.row(ii)[1].value)[0][1:-1])
                 result.append( data.Balance(meta, self.stmt_end + datetime.timedelta(days=1),
                                             acc,
@@ -134,6 +134,14 @@ class Importer(importer.ImporterProtocol):
                 sec_currency = re.search(r'\(.*\)', sheet.row(ii)[1].value)[0][1:-1]
                 ii += 2
                 while sheet.row(ii)[1].value == sec_currency:
+                    if self.stmt_begin < datetime.date(2018, 11, 1):
+                        ii +=1
+                        continue
+                    meta = data.new_metadata(file.name, ii)
+                    result.append( data.Balance(meta, self.stmt_end + datetime.timedelta(days=1),
+                                            self.exchanges[sheet.row(ii)[14].value],
+                                            amount.Amount(D(str(sheet.row(ii)[13].value)), fix_currency(sec_currency)),
+                                            None, None))
                     ii += 1
                 while sheet.row(ii)[1].value != 'Итого:':
                     ticker = fix_ticker(sheet.row(ii)[1].value)
@@ -143,7 +151,20 @@ class Importer(importer.ImporterProtocol):
                                             amount.Amount(D(str(sheet.row(ii)[10].value)), ticker),
                                             None, None))
                     ii += 1
-
+            if (re.match(r'^Портфель по ценным бумагам', sheet.row(ii)[1].value) and 
+                    sheet.row(ii)[6].value == 'на начало периода'):
+                ii += 3
+                while sheet.row(ii)[1].value != 'Итого:':
+                    if re.match('.*\(в пути\)', sheet.row(ii)[1].value):
+                        ii += 1
+                        continue
+                    ticker = fix_ticker(sheet.row(ii)[1].value)
+                    account_inst = account.join(self.account_root, ticker)
+                    result.append( data.Balance(meta, self.stmt_end + datetime.timedelta(days=1),
+                                            account_inst,
+                                            amount.Amount(D(str(sheet.row(ii)[10].value)), ticker),
+                                            None, None))
+                    ii += 1
         return result
 
     def get_cashflow(self, book, sheet, index, file):
@@ -162,8 +183,10 @@ class Importer(importer.ImporterProtocol):
                 break
 
             if sheet.row(ii)[1].value[:6] == '1.1.1.':
+                acc_choice = self.account_cash
                 acc = self.account_cash
             if sheet.row(ii)[1].value[:6] == '1.1.2.':
+                acc_choice = self.account_currencyexchange
                 acc = self.account_currencyexchange
 
             xfx = sheet.cell_xf_index(ii, 1)
@@ -176,7 +199,18 @@ class Importer(importer.ImporterProtocol):
             trn_currency = fix_currency(sheet.row(ii-1)[1].value)
             ii += 1 # skip table head
             while ii<sheet.nrows-1:
+                if sheet.row(ii)[2].value == 'Итого:':
+                    ii += 1
+                    continue
+                if sheet.row(ii)[1].value[:15] == 'Итого по валюте':
+                    ii += 4
+                    break
+
                 trn_date = datetime.datetime.strptime(sheet.row(ii)[1].value, '%d.%m.%y').date()
+                try:
+                    acc = self.exchanges[sheet.row(ii)[12].value]
+                except KeyError:
+                    acc = acc_choice
                 meta = data.new_metadata(file.name, ii)
                 if sheet.row(ii)[2].value == 'Приход ДС':
                     amt = amount.Amount(D(str(sheet.row(ii)[6].value)), trn_currency)
@@ -199,15 +233,6 @@ class Importer(importer.ImporterProtocol):
                         ])
                     result.append(txn)
                 elif sheet.row(ii)[2].value == 'Переводы между площадками':
-                    #TODO: deal with duplicate transaction
-                    # if sheet.row(ii)[11].value == 'ММВБ':
-                    #     acc1 = self.account_cash 
-                    # elif sheet.row(ii)[11].value == 'МосБирж(Валютный рынок)':
-                    #     acc1 = self.account_currencyexchange
-                    # if sheet.row(ii)[13].value == 'ММВБ':
-                    #     acc2 = self.account_cash 
-                    # elif sheet.row(ii)[13].value == 'МосБирж(Валютный рынок)':
-                    #     acc2 = self.account_currencyexchange
                     try:
                         acc1 = self.exchanges[sheet.row(ii)[11].value]
                         acc2 = self.exchanges[sheet.row(ii)[13].value]
@@ -236,7 +261,7 @@ class Importer(importer.ImporterProtocol):
                         dedup.append(dd)
 
                     txn = data.Transaction(
-                        meta, trn_date, flags.FLAG_WARNING, None, sheet.row(ii)[2].value, data.EMPTY_SET, {trn_date}, [
+                        meta, trn_date, self.FLAG, None, sheet.row(ii)[2].value, data.EMPTY_SET, {trn_date}, [
                             data.Posting(acc1, amt, None, None, None,
                                             None),
                             data.Posting(acc2, -amt, None, None, None,
@@ -254,9 +279,9 @@ class Importer(importer.ImporterProtocol):
                                             None),
                         ])
                     result.append(txn)
-                elif sheet.row(ii)[2].value in ['Урегулирование сделок','Вознаграждение за обслуживание счета депо',
-                                                'Вознаграждение компании', 'Quik','Оплата за вывод денежных средств', 'Подоходный налог',
-                                                'НДФЛ','Комиссия за займы "овернайт ЦБ"']:
+                elif sheet.row(ii)[2].value in ['Урегулирование сделок','Вознаграждение за обслуживание счета депо', 'Хранение ЦБ',
+                                                'Вознаграждение компании', 'Quik','Оплата за вывод денежных средств', 
+                                                'Комиссия за займы "овернайт ЦБ"', 'Урегулирование сделок по Айсберг-заявкам']:
                     # unfortunately we don't have ticker info for fees
                     amt = amount.Amount(D(str(sheet.row(ii)[7].value)), trn_currency)
                     txn = data.Transaction(
@@ -268,7 +293,7 @@ class Importer(importer.ImporterProtocol):
                         ])
                     result.append(txn)
                 elif sheet.row(ii)[2].value in ['Займы "овернайт"', 'Проценты по займам "овернайт"', 'Проценты по займам "овернайт ЦБ"',
-                                                'НКД от операций']:
+                                                'НКД от операций', 'НДФЛ', 'Подоходный налог']:
                     if sheet.row(ii)[7].value:
                         amt = amount.Amount(D(str(sheet.row(ii)[7].value)), trn_currency) 
                         txn = data.Transaction(
