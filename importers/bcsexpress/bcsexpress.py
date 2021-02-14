@@ -18,7 +18,17 @@ from beancount.core import position
 from beancount.ingest import importer
 from xlrd.biffh import XLRDError
 
+NOCOST = position.CostSpec(None, None, None, None, None, None)
+
 def fix_ticker(ticker):
+    if ticker == 'CHMF_02':
+        return 'CHMF'
+    if ticker == 'PAI_BCS4':
+        return 'PAIBCS4'
+    if ticker == 'PAI_BCS1':
+        return 'PAIBCS1'
+    if ticker == 'OGK2_2':
+        return 'OGK2'
     if ticker == 'TGK1_01':
         return 'TGKA'
     if ticker == 'GAZP2':
@@ -64,7 +74,8 @@ class Importer(importer.ImporterProtocol):
                  account_interest,
                  account_fees, 
                  account_gains,
-                 account_external):
+                 account_external,
+                 balance = True):
         self.general_agreement_id = general_agreement_id
         self.account_root = account_root
         self.account_cash = account_cash
@@ -74,6 +85,7 @@ class Importer(importer.ImporterProtocol):
         self.account_fees = account_fees
         self.account_gains = account_gains
         self.account_external = account_external
+        self.balance = balance
 
         self.exchanges = {
                             'ММВБ':self.account_cash,
@@ -179,7 +191,8 @@ class Importer(importer.ImporterProtocol):
         ii = index + 1
         while ii<sheet.nrows-1:
             # check if it's not the next section's head
-            if re.match('^1\.3', sheet.row(ii)[1].value) or sheet.row(ii)[1].value=='3. Активы:':
+            if (re.match('^1\.3', sheet.row(ii)[1].value) or sheet.row(ii)[1].value=='3. Активы:' 
+                    or re.match('^2\.1', sheet.row(ii)[1].value) or re.match('^2\.3', sheet.row(ii)[1].value)):
                 break
 
             if sheet.row(ii)[1].value[:6] == '1.1.1.':
@@ -196,7 +209,11 @@ class Importer(importer.ImporterProtocol):
                 ii +=1
                 continue
             
-            trn_currency = fix_currency(sheet.row(ii-1)[1].value)
+            tt = sheet.row(ii-1)[1].value
+            if tt[:11] == 'Валюта цены':
+                trn_currency = fix_currency(tt[tt.find('=')+2:tt.find(',')])
+            else: 
+                trn_currency = fix_currency(tt)
             ii += 1 # skip table head
             while ii<sheet.nrows-1:
                 if sheet.row(ii)[2].value == 'Итого:':
@@ -345,7 +362,8 @@ class Importer(importer.ImporterProtocol):
             if sheet.row(index)[1].value == r'2.1. Сделки:': 
                 entries += self.get_transactions(workbook, sheet, index, file)
         
-        entries += self.get_balance(sheet, file)
+        if self.balance:
+            entries += self.get_balance(sheet, file)
         return entries
 
     def get_transactions(self, book, sheet, index, file):
@@ -362,7 +380,7 @@ class Importer(importer.ImporterProtocol):
                 ii +=1
                 continue
             # Find section with stocks
-            if sheet.row(ii-2)[1].value in ['Акция', 'АДР']:
+            if sheet.row(ii-2)[1].value in ['Акция', 'АДР', 'Пай']:
                 acc = self.account_cash
                 ii += 1
                 # Transactions table begins in row+3 (first ticker) and continues until blank line
@@ -386,6 +404,8 @@ class Importer(importer.ImporterProtocol):
                             units_inst = amount.Amount(D(sheet.row(ii)[4].value), ticker) # amount of ticker bought
                             price = amount.Amount(-1*D(str(sheet.row(ii)[6].value)), trn_currency) # payment for transaction
                             cost = position.Cost(D(str(sheet.row(ii)[5].value)), trn_currency, None, None) # cost of single unit
+                            #cost = amount.Amount(D(str(sheet.row(ii)[5].value)), trn_currency) # cost of single unit
+                            #pos = position.Position(units_inst, cost)
                             txn = data.Transaction(
                                     meta, trn_date, self.FLAG, None, title, data.EMPTY_SET, {trn_num}, [
                                         data.Posting(acc, price, None, None, None, None),
@@ -407,7 +427,7 @@ class Importer(importer.ImporterProtocol):
                                                         None),
                                         #data.Posting(self.account_fees, fees, None, None, None,
                                         #                None), # no fees associated with transaction
-                                        data.Posting(account_inst, units_inst, None, cost, None,
+                                        data.Posting(account_inst, units_inst, NOCOST, cost, None,
                                                         None),
                                         data.Posting(account_gains, None, None, None, None,
                                                         None),
@@ -433,19 +453,20 @@ class Importer(importer.ImporterProtocol):
                         # check if we buy or sell
                         if sheet.row(ii)[4].value:
                             # we buy
-                            conv_rate = position.Cost(D(str(sheet.row(ii)[4].value)), 
-                                                      bought_currency, None, None)
+                            conv_rate = amount.Amount(D(str(sheet.row(ii)[4].value)), 
+                                                      bought_currency)
                             amount_bought = amount.Amount(D(sheet.row(ii)[5].value), sold_currency) # amount of ticker sold
                             price = amount.Amount(-1*D(str(sheet.row(ii)[6].value)), bought_currency) # payment for transaction,                            
                         else:
                             #we sell
-                            conv_rate = position.Cost(D(str(sheet.row(ii)[7].value)), 
-                                                    bought_currency, None, None)
+                            conv_rate = amount.Amount(D(str(sheet.row(ii)[7].value)), 
+                                                    bought_currency)
                             amount_bought = amount.Amount(-1*D(sheet.row(ii)[8].value), sold_currency) # amount of ticker sold
                             price = amount.Amount(D(str(sheet.row(ii)[9].value)), bought_currency) # payment for transaction
                         txn = data.Transaction(
                                     meta, trn_date, self.FLAG, None, ticker, data.EMPTY_SET, {trn_num}, [
-                                        data.Posting(acc, amount_bought, conv_rate, None, None, None),
+                                        #data.Posting(acc, amount_bought, conv_rate, None, None, None),
+                                        data.Posting(acc, amount_bought, None, conv_rate, None, None),
                                         data.Posting(acc, price, None, None, None, None),
                                     ])
                         entries.append(txn)
@@ -496,7 +517,7 @@ class Importer(importer.ImporterProtocol):
                                                         None),
                                         #data.Posting(self.account_fees, fees, None, None, None,
                                         #                None), # no fees associated with transaction
-                                        data.Posting(account_inst, units_inst, None, cost, None,
+                                        data.Posting(account_inst, units_inst, NOCOST, cost, None,
                                                         None),
                                         data.Posting(account_gains, None, None, None, None,
                                                         None),
