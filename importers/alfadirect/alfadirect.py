@@ -1,11 +1,12 @@
-'''Importer for Alfa Direct broker - broker reports from XLS files
+''' Importer for Alfa Direct broker - broker reports from XLS files
+    TODO: chcp 65001 & set PYTHONIOENCODING=utf-8
 '''
 import xlrd
 import datetime
 import re
-from os import path
-
-#from dateutil.parser import parse
+import os
+import csv
+from importlib.resources import open_text
 
 from beancount.core.amount import D
 from beancount.core import data
@@ -15,51 +16,9 @@ from beancount.core import amount
 from beancount.core import position
 from beancount.ingest import importer
 from xlrd.biffh import XLRDError
+from xlrd.xldate import xldate_as_datetime
 
 NOCOST = position.CostSpec(None, None, None, None, None, None)
-
-# def fix_ticker(ticker):
-#     if ticker == 'CHMF_02':
-#         return 'CHMF'
-#     if ticker == 'PAI_BCS4':
-#         return 'PAIBCS4'
-#     if ticker == 'PAI_BCS1':
-#         return 'PAIBCS1'
-#     if ticker == 'OGK2_2':
-#         return 'OGK2'
-#     if ticker == 'TGK1_01':
-#         return 'TGKA'
-#     if ticker == 'GAZP2':
-#         return 'GAZP'
-#     if ticker == 'MICEX_09':
-#         return 'MICEX'
-#     if ticker == 'PHOR_0':
-#         return 'PHOR'
-#     if ticker == 'ENPL_LI':
-#         return 'ENPLADR'
-#     if ticker == 'HK_486':
-#         return 'RUSALADR'
-#     return ticker
-
-# def fix_currency(ticker):
-#     return 'RUB' if ticker == 'Рубль' else ticker
-
-def check_bcsexpress(xlsfile, genid):
-    ''' Verify if file from BCS Express broker
-    '''
-    workbook = xlrd.open_workbook(xlsfile)
-    try:
-        sheet = workbook.sheet_by_name('TDSheet')
-    except XLRDError:
-        return False # No correct sheet in file
-    broker_name = sheet.row_values(0, start_colx=1, end_colx=None)
-    if not re.match(r'ООО "Компания БКС"', broker_name[4]):
-        return False
-    # Check general agreement id
-    genagr = sheet.row_values(4, start_colx=1, end_colx=None)
-    if not re.match(genid, genagr[4]):
-        return False
-    return True
 
 class Importer(importer.ImporterProtocol):
     '''An importer for Alfa Direct XLS files'''
@@ -73,6 +32,7 @@ class Importer(importer.ImporterProtocol):
                  account_fees, 
                  account_gains,
                  account_external,
+                 account_repo = None,
                  balance = True):
         self.general_agreement_id = general_agreement_id
         self.account_root = account_root
@@ -84,101 +44,511 @@ class Importer(importer.ImporterProtocol):
         self.account_gains = account_gains
         self.account_external = account_external
         self.balance = balance
+        self.account_repo = account_repo if account_repo else account_fees
 
+        self.isindb = {}
+        self.isincur = {} # dictionary of isin code with corresponding asset base currencies
+        self.isinbond = {} # True if bond
+        self.isinfv = {} # Face value
         self.exchanges = {
                             'РЦБ':self.account_cash,
-                            'Вал.рынок':self.account_currencyexchange
+                            'Вал. рынок':self.account_currencyexchange,
+                            'Фонд. рынок':self.account_cash
                         }
+        self.cur = ['c Доллар США', 'c Евро']
+
+    def check_alfadirect(self, xlsfile, genid):
+        ''' * Verify if file from Alfa Direct broker
+        '''
+        workbook = xlrd.open_workbook(xlsfile, logfile=open(os.devnull, 'w'))
+        try:
+            sheet = workbook.sheet_by_index(0)
+        except XLRDError:
+            return False # No correct sheet in file
+        # No broker name as string - only logo TODO: check logo?
+        # broker_name = sheet.row_values(0, start_colx=1, end_colx=None)
+        # if not re.match(r'ООО "Компания БКС"', broker_name[4]):
+        #     return False
+        # Check general agreement id
+        if sheet.row(5)[8].value.find(genid) == -1:
+            return False
+        return True
+
+    def load_isin(self):
+        ''' Load file with ISIN database used to find out tickers of assets.
+            It is possible to download up-to-date ISIN database
+            from: https://www.moex.com/msn/stock-instruments
+            TODO: fix loader to process original file (now I delete blank lines)
+        '''
+        # get file from module's directory
+        fn = os.path.join(os.path.dirname(__file__), 'moex_db.csv')
+        with open(fn, newline='', encoding='cp1251') as f:
+            r = csv.reader(f, delimiter=';')
+            line_count = 0
+            for row in r:
+                if line_count == 0:
+                    line_count += 1
+                    continue
+                try:
+                    self.isindb[row[4]] = row[0] # ticker
+                    self.isincur[row[4]] = row[8] # currency
+                    self.isinfv[row[4]] = float(row[7].replace(',', '.')) # face value
+                    if (row[3] == r'ОФЗ' or re.match(r'.*[Оо]блигации.*', row[3])):
+                        self.isinbond[row[4]] = True
+                    line_count += 1
+                except IndexError:
+                    break
+        self.isindb['US29355E2081'] = 'ENPLADR'
+        self.isindb['JE00B5BCW814'] = 'RUAL'
 
     def identify(self, file):
-        ''' Match if the filename is broker report from Alfa Direct
+        ''' * Match if the filename is broker report from Alfa Direct
         '''
-        if not re.match(r".*B[_ ]k-.*", path.basename(file.name)):
-            return False
-        if re.match(r"\.~lock", path.basename(file.name)):
+        # Check if it isn't LibreOffice lock file
+        if re.match(r"\.~lock", os.path.basename(file.name)):
             return False
         # Match extension - should be XLS
-        if not re.match(r".xls", path.splitext(file.name)[1]):
+        if not re.match(r"\.xls", os.path.splitext(file.name)[1]):
+            return False
+        # Check file name format and correct general agreement id
+        if not re.match(r"Брокерский\+"+self.general_agreement_id, os.path.basename(file.name)):
             return False
         # Check if we have broker name in header and check general agreement id
-        return check_bcsexpress(file.name, self.general_agreement_id)
+        return self.check_alfadirect(file.name, self.general_agreement_id)
 
     def file_account(self, _):
+        ''' *
+        '''
         return self.account_root
 
     def file_date(self, file):
-        ''' Extract the statement date from the file
+        ''' * Extract the statement date from the file
         '''
-        workbook = xlrd.open_workbook(file.name)
-        sheet = workbook.sheet_by_name('TDSheet')
-        rows = sheet.get_rows()
-        for row in rows:
-            if re.match('Дата составления отчета:', row[1].value):
-                return datetime.datetime.strptime(row[4].value, '%d.%m.%Y').date()
-        # Couldn't extract date - use file creation date instead
+        # No report creation date - use file creation date instead
         return None
- 
-    def get_balance(self, sheet, file):
-        ''' Will parse broker report for end of period balances - cash and assets
+
+    def extract(self, file):
+        ''' Open XLS file and create directives
+        '''
+        entries = []
+        workbook = xlrd.open_workbook(file.name, logfile=open(os.devnull, 'w'))
+        # 1. Load end of report balances: 'Динамика позиций' sheet
+        sheet = workbook.sheet_by_name('Динамика позиций') #TODO change sheet to 0 (first sheet in workbook)
+        # extract broker report dates - row 3 col 8
+        per = sheet.row(3)[8].value
+        self.stmt_begin = datetime.datetime.strptime(per[:10], '%d.%m.%Y').date()
+        self.stmt_end = datetime.datetime.strptime(per[13:], '%d.%m.%Y').date()
+        del sheet
+
+        self.load_isin()
+        # for index in range(sheet.nrows):
+        #     if sheet.row(index)[1].value == r'1. Движение денежных средств': #'1.1. Движение денежных средств по совершенным сделкам:':
+        #         cashflow = self.get_cashflow(workbook, sheet, index, file)
+        #         entries += cashflow
+        #     # Find section 2.1 - transactions completed in report's period
+        #     if sheet.row(index)[1].value == r'2.1. Сделки:': 
+        #         entries += self.get_transactions(workbook, sheet, index, file)
+        
+        if self.balance:
+            entries += self.get_balance(workbook, file)
+
+        entries += self.get_trn(workbook, file)
+        entries += self.get_cflow(workbook, file)
+
+        return entries
+
+    def get_balance(self, workbook, file):
+        ''' * Parse broker report for end of period balances - cash and assets
             In: XLS sheet, file
             Out: list of transactions
         '''
-        result =[]
-        acc = ''
-        for ii in range(sheet.nrows):
+        try:
+            sheet = workbook.sheet_by_name('Динамика позиций')
+        except XLRDError:
+            return None # No balances sheet in file
+
+        result = []
+        ii = 0
+        market = 0
+        asset_type = 0
+        #acc = ''
+        while sheet.row(ii)[6].value != 'Стоимость всех позиций, руб.':
+            if sheet.row(ii)[6].value[:5] == 'Актив':
+                hh = sheet.row(ii) # header of the table
+                jj = 6
+                while True:
+                    if hh[jj].value == 'хранения':
+                        market = jj
+                        break
+                    jj += 1
+            # check if it's not the next section's head
+            if sheet.row(ii)[2].value == 'Валюта':
+                asset_type = 1 # Currency
+            elif sheet.row(ii)[2].value == 'Акции' or sheet.row(ii)[2].value == 'Прочее':
+                asset_type = 2 # Stocks and ADRs
+            if sheet.row(ii)[6].value:
+                meta = data.new_metadata(file.name, ii)
+                if asset_type == 1:
+                    # line with currencies
+                    ticker = sheet.row(ii)[6].value
+                    acc = self.exchanges[sheet.row(ii)[market].value]
+                    result.append(data.Balance(meta, 
+                                    self.stmt_end + datetime.timedelta(days=1),
+                                    acc,
+                                    amount.Amount(D(str(sheet.row(ii)[15].value)), ticker),
+                                    None, None))
+                elif asset_type == 2:
+                    # line with stocks
+                    ticker = self.isindb[sheet.row(ii+1)[6].value]
+                    account_inst = account.join(self.account_root, ticker)
+                    amt = amount.Amount(D(str(sheet.row(ii)[15].value)), ticker)
+                    result.append(data.Balance(meta, 
+                                    self.stmt_end + datetime.timedelta(days=1),
+                                    account_inst,
+                                    amt,
+                                    None, None))
+                    # each stock adr ADR occupy 2 lines so skip additional line
+                    ii += 1
+            ii += 1
+
+        return result
+
+    def get_trn(self, workbook, file):
+        ''' Parse broker report for all assets transactions
+        '''
+        try:
+            sheet = workbook.sheet_by_name('Завершенные сделки')
+        except XLRDError:
+            return None # No balances sheet in file
+
+        result = []
+        ii = 0
+
+        # Find beggining of table
+        while sheet.row(ii)[4].value != 'Завершенные сделки':
+            ii += 1
+        if sheet.row(ii+2)[4].value =='За указанный период сделок нет':
+            return []
+        ii +=2
+        jj = 0
+        while sheet.row(ii)[jj].value != 'Дата\nрасчетов':
+            jj += 1
+        date_col = jj
+        while sheet.row(ii)[jj].value != '\nМесто\nзаключения\nсделки ⁵':
+            jj += 1
+        market_col = jj
+        while sheet.row(ii)[jj].value != 'ISIN/рег.код':
+            jj += 1
+        isin_col = jj
+        while sheet.row(ii)[jj].value != 'Актив':
+            jj += 1
+        ticker_col = jj
+        while sheet.row(ii)[jj].value != '\nКуплено\n(продано),\nшт.':
+            jj += 1
+        amt_col = jj
+        while sheet.row(ii)[jj].value != 'Цена':
+            jj += 1
+        conv_col = jj
+        while sheet.row(ii)[jj].value != 'Сумма\nсделки⁶ ':
+            jj += 1
+        price_col = jj
+        while sheet.row(ii)[jj].value != 'Вал.⁸':
+            jj += 1
+        cur_col = jj
+
+
+        ii +=1 # pass to first row of the table
+        while sheet.row(ii)[4].value != '':
             meta = data.new_metadata(file.name, ii)
-            
-            if sheet.row(ii)[1].value[:6] == '1.1.1.':
-                acc = self.account_cash
-            if sheet.row(ii)[1].value[:6] == '1.1.2.':
-                acc = self.account_currencyexchange
-            if (self.stmt_begin < datetime.date(2018, 11, 1) and 
-                    re.match(r'^Остаток денежных средств на конец периода \(', sheet.row(ii)[1].value)):
-                balance_currency = fix_currency(re.search(r'\(.*\)', sheet.row(ii)[1].value)[0][1:-1])
-                result.append( data.Balance(meta, self.stmt_end + datetime.timedelta(days=1),
-                                            acc,
-                                            amount.Amount(D(str(sheet.row(ii)[7].value)), balance_currency),
-                                            None, None))
-            if (re.match(r'^Портфель по ценным бумагам и денежным средствам \(', sheet.row(ii)[1].value) and 
-                    sheet.row(ii)[6].value == 'на начало периода'):
-                sec_currency = re.search(r'\(.*\)', sheet.row(ii)[1].value)[0][1:-1]
-                ii += 2
-                while sheet.row(ii)[1].value == sec_currency:
-                    if self.stmt_begin < datetime.date(2018, 11, 1):
-                        ii +=1
-                        continue
+            trn_date = datetime.datetime.strptime(sheet.row(ii)[date_col].value[:10], '%d.%m.%Y').date()
+            ticker_cur = sheet.row(ii)[cur_col].value
+
+            # currency exchange
+            # if sheet.row(ii)[market_col].value == 'МБ ВР':
+            #     ticker = sheet.row(ii)[ticker_col].value
+            #     acc = self.account_currencyexchange
+            #     amt = amount.Amount(D(sheet.row(ii)[amt_col].value), ticker)
+            #     sign = -1 if sheet.row(ii)[amt_col].value>=0 else 1
+            #     conv_rate = amount.Amount(D(str(sheet.row(ii)[conv_col].value)), ticker_cur)
+            #     price = amount.Amount(sign*D(str(sheet.row(ii)[price_col].value)), ticker_cur)
+                
+            #     txn = data.Transaction(
+            #                         meta, trn_date, self.FLAG, None, ticker, data.EMPTY_SET, data.EMPTY_SET, 
+            #                         [
+            #                             data.Posting(acc, amt, None, conv_rate, None, None),
+            #                             data.Posting(acc, price, None, None, None, None),
+            #                         ])
+            #     result.append(txn)
+
+            # assets transactions
+            if sheet.row(ii)[market_col].value == 'МБ ФР' or sheet.row(ii)[market_col].value == 'КЦ МФБ':
+                try:
+                    ticker = self.isindb[sheet.row(ii)[isin_col].value]
+                except KeyError:
+                    ticker = sheet.row(ii)[isin_col].value
+                desc = sheet.row(ii)[12].value #TODO column?
+                amt = amount.Amount(D(sheet.row(ii)[amt_col].value), ticker)
+                sign = -1 if sheet.row(ii)[amt_col].value>=0 else 1
+                price = amount.Amount(sign*D(str(sheet.row(ii)[price_col].value)), ticker_cur)
+                account_inst = account.join(self.account_root, ticker)
+                '''
+                isbond = False
+                if sheet.row(ii)[20].value:
+                    # bonds - we need to calculate cost differently: take into account face value
+                    #print(ticker, sheet.row(ii)[20].value)
+                    isbond = True
+                    try:
+                        cost = position.Cost(D(str(sheet.row(ii)[17].value*self.isinfv[sheet.row(ii)[11].value]/100)), 
+                                            ticker_cur, None, None)
+                    except KeyError:
+                        # no such ticker in DB - assume 1000 face value
+                        cost = position.Cost(D(str(sheet.row(ii)[17].value*10)), ticker_cur, None, None)
+                else:
+                    cost = position.Cost(D(str(sheet.row(ii)[17].value)), ticker_cur, None, None)
+                '''
+                if sign == -1:
+                    # we bought ticket
+                    txn = data.Transaction(
+                                        meta, trn_date, self.FLAG, None, desc, data.EMPTY_SET, data.EMPTY_SET, 
+                                        [
+                                            data.Posting(self.account_cash, price, None, None, None, None),
+                                            #data.Posting(account_inst, amt, cost, None, None, None),
+                                            data.Posting(account_inst, amt, NOCOST, None, None, None),
+                                        ])
+                else:
+                    # we sold ticket
+                    account_gains = self.account_gains.format(ticker)
+                    '''
+                    if isbond:
+                        try:
+                            cost = amount.Amount(D(str(sheet.row(ii)[17].value*self.isinfv[sheet.row(ii)[11].value]/100)), ticker_cur)
+                        except KeyError:
+                            cost = amount.Amount(D(str(sheet.row(ii)[17].value*10)), ticker_cur)
+                    else:
+                        cost = amount.Amount(D(str(sheet.row(ii)[17].value)), ticker_cur)
+                    '''
+                    txn = data.Transaction(
+                                    meta, trn_date, self.FLAG, None, desc, data.EMPTY_SET, data.EMPTY_SET, 
+                                    [
+                                        data.Posting(self.account_cash, price, None, None, None, None),
+                                        #data.Posting(account_inst, amt, NOCOST, cost, None, None),
+                                        data.Posting(account_inst, amt, NOCOST, None, None, None),
+                                        data.Posting(account_gains, None, None, None, None, None),
+                                    ])
+                result.append(txn)
+
+            # move to next line    
+            ii +=1
+
+        return result
+
+    def get_cflow(self, workbook, file):
+        ''' Parse broker report for all cash transactions
+        '''
+        try:
+            sheet = workbook.sheet_by_name(' Движение ДС') # Note space in sheet name
+        except XLRDError:
+            return None # No balances sheet in file
+
+        result = []
+        currconv = []
+        currconvamt = {}
+        ii = 0
+
+        while ii < sheet.nrows-1:
+        
+            if (sheet.row(ii)[2].value == 'Фондовый рынок' and 
+                    sheet.row(ii+1)[2].value !='За указанный период движений денежных средств нет'):
+                ii +=6 # pass to first row of the table
+                cur = self.proc_header(sheet.row(ii-1))
+                ncur = len(cur)
+                #print(ncur, cur)
+                while sheet.row(ii)[10].value != 'Итого:':
                     meta = data.new_metadata(file.name, ii)
-                    result.append( data.Balance(meta, self.stmt_end + datetime.timedelta(days=1),
-                                            self.exchanges[sheet.row(ii)[14].value],
-                                            amount.Amount(D(str(sheet.row(ii)[13].value)), fix_currency(sec_currency)),
-                                            None, None))
+                    if sheet.row(ii)[2].value !='': # keep last date that was in 2d column
+                        trn_date = xldate_as_datetime(sheet.row(ii)[2].value, 0).date()
+                    #print(trn_date, sheet.row(ii)[9].value)
+                    for c in cur:
+                        if sheet.row(ii)[c[1]].value !='':
+                            trn_cur = c[0]
+                            trn_amt = sheet.row(ii)[c[1]].value
+                            break
+                    amt = amount.Amount(D(str(trn_amt)), trn_cur)
+                    desc = sheet.row(ii)[10].value
+                    if sheet.row(ii)[9].value == 'Комиссия':
+                        if desc == 'по сделке РЕПО':
+                            txn = data.Transaction(
+                            meta, trn_date, self.FLAG, None, sheet.row(ii)[9].value+' '+sheet.row(ii)[10].value, data.EMPTY_SET, {trn_date}, [
+                                data.Posting(self.account_cash, amt, None, None, None,
+                                                None),
+                                data.Posting(self.account_repo, -amt, None, None, None,
+                                                None),
+                            ])
+                        else:
+                            txn = data.Transaction(
+                                meta, trn_date, self.FLAG, None, sheet.row(ii)[9].value+' '+sheet.row(ii)[10].value, data.EMPTY_SET, {trn_date}, [
+                                    data.Posting(self.account_cash, amt, None, None, None,
+                                                    None),
+                                    data.Posting(self.account_fees, -amt, None, None, None,
+                                                    None),
+                                ])
+                        result.append(txn)
+                    if sheet.row(ii)[9].value == 'Расчеты по сделке' and desc.find('РЕПО ч.')!=-1:
+                        txn = data.Transaction(
+                                meta, trn_date, self.FLAG, None, sheet.row(ii)[9].value+' '+sheet.row(ii)[10].value, data.EMPTY_SET, {trn_date}, [
+                                    data.Posting(self.account_cash, amt, None, None, None,
+                                                    None),
+                                    data.Posting(self.account_repo, -amt, None, None, None,
+                                                    None),
+                                ])
+                        result.append(txn)
+                    if sheet.row(ii)[9].value == 'Расчеты по сделке' and desc in self.cur:
+                        opertime = xldate_as_datetime(sheet.row(ii)[6].value, 0)
+                        try:
+                            price = currconvamt[(opertime, desc)]
+                            if price.currency == amt.currency:
+                                raise ValueError
+                            currconv.remove((opertime, desc))
+                            rate = amount.Amount(abs(amt.number/price.number), amt.currency)
+                            #print("R:", rate)
+                            txn = data.Transaction(
+                                    meta, trn_date, self.FLAG, None, 'Расчеты по сделке ' + desc, data.EMPTY_SET, data.EMPTY_SET, 
+                                    [
+                                        data.Posting(self.account_cash, amt, None, None, None, None),
+                                        data.Posting(self.account_cash, price, None, rate, None, None),
+                                    ])
+                            result.append(txn)
+                        except (ValueError, KeyError):
+                            currconv.append((opertime, desc))
+                            currconvamt[(opertime, desc)] = amt
+
+                    
+                    if sheet.row(ii)[9].value == 'Перевод':
+                        if desc == 'Между рынками':
+                            acc = self.account_currencyexchange
+                        elif (desc[:9] == 'Дивиденды' or desc.find('погашение купона')!=-1 or 
+                                desc.find('INTEREST PAYMENT')!=-1 or desc.find('Cash Dividend')!=-1):
+                            acc = self.account_dividends
+                        else:
+                            acc = self.account_external
+                        
+                        txn = data.Transaction(
+                            meta, trn_date, self.FLAG, None, sheet.row(ii)[9].value+' '+desc, data.EMPTY_SET, {trn_date}, [
+                                data.Posting(self.account_cash, amt, None, None, None,
+                                                None),
+                                data.Posting(acc, -amt, None, None, None,
+                                                None),
+                            ])
+                        result.append(txn)
+                    elif sheet.row(ii)[9].value == 'НДФЛ':
+                        txn = data.Transaction(
+                            meta, trn_date, self.FLAG, None, sheet.row(ii)[9].value+' '+desc, data.EMPTY_SET, {trn_date}, [
+                                data.Posting(self.account_cash, amt, None, None, None,
+                                                None),
+                                data.Posting(self.account_external, -amt, None, None, None,
+                                                None),
+                            ])
+                        result.append(txn)
+
+                    # next line for Фондовый рынок
                     ii += 1
-                while sheet.row(ii)[1].value != 'Итого:':
-                    ticker = fix_ticker(sheet.row(ii)[1].value)
-                    account_inst = account.join(self.account_root, ticker)
-                    result.append( data.Balance(meta, self.stmt_end + datetime.timedelta(days=1),
-                                            account_inst,
-                                            amount.Amount(D(str(sheet.row(ii)[10].value)), ticker),
-                                            None, None))
-                    ii += 1
-            if (re.match(r'^Портфель по ценным бумагам', sheet.row(ii)[1].value) and 
-                    sheet.row(ii)[6].value == 'на начало периода'):
-                ii += 3
-                while sheet.row(ii)[1].value != 'Итого:':
-                    if re.match('.*\(в пути\)', sheet.row(ii)[1].value):
-                        ii += 1
-                        continue
-                    ticker = fix_ticker(sheet.row(ii)[1].value)
-                    account_inst = account.join(self.account_root, ticker)
-                    result.append( data.Balance(meta, self.stmt_end + datetime.timedelta(days=1),
-                                            account_inst,
-                                            amount.Amount(D(str(sheet.row(ii)[10].value)), ticker),
-                                            None, None))
-                    ii += 1
+        
+            if (sheet.row(ii)[2].value == 'Валютный рынок'  and 
+                    sheet.row(ii+1)[2].value !='За указанный период движений денежных средств нет'):
+                ii +=6 # pass to first row of the table
+                cur = self.proc_header(sheet.row(ii-1))
+                ncur = len(cur)
+                #print(ncur, cur)
+                
+                while sheet.row(ii)[10].value != 'Итого:':
+                    meta = data.new_metadata(file.name, ii)
+                    if sheet.row(ii)[2].value !='': # keep last date that was in 2d column
+                        trn_date = xldate_as_datetime(sheet.row(ii)[2].value, 0).date()
+                    #print(trn_date, sheet.row(ii)[9].value)
+                    for c in cur:
+                        if sheet.row(ii)[c[1]].value !='':
+                            trn_cur = c[0]
+                            trn_amt = sheet.row(ii)[c[1]].value
+                            break
+                    amt = amount.Amount(D(str(trn_amt)), trn_cur)
+                    desc = sheet.row(ii)[10].value
+                    if sheet.row(ii)[9].value == 'Комиссия':
+                        # if desc == 'по сделке РЕПО':
+                        #     txn = data.Transaction(
+                        #     meta, trn_date, self.FLAG, None, sheet.row(ii)[9].value+' '+sheet.row(ii)[10].value, data.EMPTY_SET, {trn_date}, [
+                        #         data.Posting(self.account_cash, amt, None, None, None,
+                        #                         None),
+                        #         data.Posting(self.account_repo, -amt, None, None, None,
+                        #                         None),
+                        #     ])
+                        # else:
+                        txn = data.Transaction(
+                            meta, trn_date, self.FLAG, None, sheet.row(ii)[9].value+' '+sheet.row(ii)[10].value, data.EMPTY_SET, {trn_date}, [
+                                data.Posting(self.account_currencyexchange, amt, None, None, None,
+                                                None),
+                                data.Posting(self.account_fees, -amt, None, None, None,
+                                                None),
+                            ])
+                        result.append(txn)
+                    if sheet.row(ii)[9].value == 'Расчеты по сделке' and desc in self.cur:
+                        opertime = xldate_as_datetime(sheet.row(ii)[6].value, 0)
+                        #print(sheet.row(ii)[9].value, ' ', desc, opertime)
+                        try:
+                            price = currconvamt[(opertime, desc)]
+                            if price.currency == amt.currency:
+                                raise ValueError
+                            currconv.remove((opertime, desc))
+                            rate = amount.Amount(abs(amt.number/price.number), amt.currency)
+                            txn = data.Transaction(
+                                    meta, trn_date, self.FLAG, None, 'Расчеты по сделке ' + desc, data.EMPTY_SET, data.EMPTY_SET, 
+                                    [
+                                        data.Posting(self.account_currencyexchange, amt, None, None, None, None),
+                                        data.Posting(self.account_currencyexchange, price, None, rate, None, None),
+                                    ])
+                            #print(txn)
+                            result.append(txn)
+                        except (ValueError, KeyError):
+                            #print(sheet.row(ii)[9].value, ' ', desc, opertime)
+                            currconv.append((opertime, desc))
+                            currconvamt[(opertime, desc)] = amt
+                    if sheet.row(ii)[9].value == 'Перевод':
+                        if desc == 'Между рынками':
+                            ii += 1
+                            continue # we processed it in previous section
+                        else:
+                            acc = self.account_external
+                        
+                        txn = data.Transaction(
+                            meta, trn_date, self.FLAG, None, sheet.row(ii)[9].value+' '+desc, data.EMPTY_SET, {trn_date}, [
+                                data.Posting(self.account_currencyexchange, amt, None, None, None,
+                                                None),
+                                data.Posting(acc, -amt, None, None, None,
+                                                None),
+                            ])
+                        result.append(txn)
+
+                    ii +=1
+
+            # Next line
+            ii += 1
+        return result
+
+    def proc_header(self, header):
+        ''' process header of the table
+        input: two lines of header
+            return list of currencies
+        '''
+        ii = 14 # first column with currency
+        result = []
+        while header[ii].value != 'ден. позиций':
+            if header[ii].value != '':
+                result.append([header[ii].value, ii])
+            ii += 1
+        
         return result
 
     def get_cashflow(self, book, sheet, index, file):
-        ''' Will parse broker report for all cash operations (deposits, drawback, fees, dividends)
+        ''' Parse broker report for all cash operations (deposits, drawback, fees, dividends)
             In: XLS sheet, index of section title(1.1.)
             Out: list of transactions -- empty if there is none
         '''
@@ -339,30 +709,6 @@ class Importer(importer.ImporterProtocol):
                                         '1.2. Займы "Овернайт"/"Овернайт ГО":', '1.2. Займы:']:
                 return result
         return result
-
-    def extract(self, file):
-        ''' Open XLS file and create directives
-        '''
-        entries = []
-        index = 0
-        workbook = xlrd.open_workbook(file.name, formatting_info=True)
-        sheet = workbook.sheet_by_name('TDSheet')
-        # extract broker report dates - row 2 col 5
-        per = sheet.row(2)[5].value
-        self.stmt_begin = datetime.datetime.strptime(per[2:12], '%d.%m.%Y').date()
-        self.stmt_end = datetime.datetime.strptime(per[16:], '%d.%m.%Y').date()
-
-        for index in range(sheet.nrows):
-            if sheet.row(index)[1].value == r'1. Движение денежных средств': #'1.1. Движение денежных средств по совершенным сделкам:':
-                cashflow = self.get_cashflow(workbook, sheet, index, file)
-                entries += cashflow
-            # Find section 2.1 - transactions completed in report's period
-            if sheet.row(index)[1].value == r'2.1. Сделки:': 
-                entries += self.get_transactions(workbook, sheet, index, file)
-        
-        if self.balance:
-            entries += self.get_balance(sheet, file)
-        return entries
 
     def get_transactions(self, book, sheet, index, file):
         # Cash and papers are described in different subsections index += 1
