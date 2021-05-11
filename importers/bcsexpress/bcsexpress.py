@@ -34,7 +34,7 @@ def fix_ticker(ticker):
     if ticker == 'GAZP2':
         return 'GAZP'
     if ticker == 'MICEX_09':
-        return 'MICEX'
+        return 'MOEX'
     if ticker == 'PHOR_0':
         return 'PHOR'
     if ticker == 'ENPL_LI':
