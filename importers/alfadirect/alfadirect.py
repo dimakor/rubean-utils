@@ -393,7 +393,7 @@ class Importer(importer.ImporterProtocol):
                                                     None),
                                 ])
                         result.append(txn)
-                    if sheet.row(ii)[9].value == 'Расчеты по сделке' and desc.find('РЕПО ч.')!=-1:
+                    if sheet.row(ii)[9].value[:17] == 'Расчеты по сделке' and desc.find('РЕПО ч.')!=-1:
                         txn = data.Transaction(
                                 meta, trn_date, self.FLAG, None, sheet.row(ii)[9].value+' '+sheet.row(ii)[10].value, data.EMPTY_SET, {trn_date}, [
                                     data.Posting(self.account_cash, amt, None, None, None,
@@ -402,7 +402,7 @@ class Importer(importer.ImporterProtocol):
                                                     None),
                                 ])
                         result.append(txn)
-                    if sheet.row(ii)[9].value == 'Расчеты по сделке' and desc in self.cur:
+                    if sheet.row(ii)[9].value[:17] == 'Расчеты по сделке' and desc in self.cur:
                         opertime = xldate_as_datetime(sheet.row(ii)[6].value, 0)
                         try:
                             price = currconvamt[(opertime, desc)]
