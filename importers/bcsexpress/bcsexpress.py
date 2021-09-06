@@ -39,6 +39,8 @@ def fix_ticker(ticker):
         return 'PHOR'
     if ticker == 'ENPL_LI':
         return 'ENPLADR'
+    if ticker == 'AGRO_LI':
+        return 'AGRO'
     if ticker == 'HK_486':
         return 'RUSALADR'
     return ticker
@@ -285,7 +287,7 @@ class Importer(importer.ImporterProtocol):
                                             None),
                         ])
                     result.append(txn)
-                elif sheet.row(ii)[2].value == 'Дивиденды':
+                elif sheet.row(ii)[2].value in ['Дивиденды', 'Возмещение дивидендов по сделке']:
                     # unfortunately we don't have ticker info for dividends
                     amt = amount.Amount(D(str(sheet.row(ii)[6].value)), trn_currency)
                     txn = data.Transaction(
