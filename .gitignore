@@ -128,3 +128,4 @@ dmypy.json
 # Pyre type checker
 .pyre/
 importers/alfadirect/vv.py
+importers/sber/procrep.py
