@@ -13,7 +13,6 @@ from rich import print
 
 from decimal import *
 from beancount.core.amount import D
-#from beancount.core.amount import abs
 from beancount.core import data
 from beancount.core import flags
 from beancount.core import account
@@ -82,28 +81,27 @@ class Importer(importer.ImporterProtocol):
         '''
         entries = []
         acc = None
-        with open("assets.pickle", "rb") as f:
-            self.assets = pickle.load(f)
-        with open("accounts.pickle", "rb") as f:
-                acc = pickle.load(f)
+        # with open("assets.pickle", "rb") as f:
+        #     self.assets = pickle.load(f)
+        # with open("accounts.pickle", "rb") as f:
+        #         acc = pickle.load(f)
         
-        #TODO: uncomment
-        client = None
-        # with Client(self.token) as client:
-        #     self.assets = (self.get_list_structure(client.instruments.shares().instruments, 'share') |
-        #                     self.get_list_structure(client.instruments.bonds().instruments, 'bond') |
-        #                     self.get_list_structure(client.instruments.etfs().instruments, 'etf') |
-        #                     self.get_list_structure(client.instruments.currencies().instruments, 'currency')
-        #                 )
+        # client = None
+        with Client(self.token) as client:
+            self.assets = (self.get_list_structure(client.instruments.shares().instruments, 'share') |
+                            self.get_list_structure(client.instruments.bonds().instruments, 'bond') |
+                            self.get_list_structure(client.instruments.etfs().instruments, 'etf') |
+                            self.get_list_structure(client.instruments.currencies().instruments, 'currency')
+                        )
         #     with open("assets.pickle", "wb") as f:
         #         pickle.dump(self.assets, f)            
-            #acc = client.users.get_accounts()
+            acc = client.users.get_accounts()
             # with open("accounts.pickle", "wb") as f:
             #     pickle.dump(acc, f)
 
-        for a in acc.accounts:
-            entries += self.get_oper(file, client, a)
-            entries += self.get_balances(file, a)
+            for a in acc.accounts:
+                entries += self.get_oper(file, client, a)
+                entries += self.get_balances(file, a)
         
         return entries
 
@@ -250,7 +248,7 @@ class Importer(importer.ImporterProtocol):
             elif trn.operation_type in [OperationType.OPERATION_TYPE_BROKER_FEE, 
                                         OperationType.OPERATION_TYPE_MARGIN_FEE,
                                         OperationType.OPERATION_TYPE_SERVICE_FEE]:
-                payment = amount.Amount(self.mv2d(trn.payment), trn.payment.currency.upper())
+                payment = amount.Amount(round(self.mv2d(trn.payment), 2), trn.payment.currency.upper())
                 meta = data.new_metadata(file.name, 1) # TODO decide what to do with line number in meta
                 txn = data.Transaction(
                             meta, delivery_date, self.FLAG, None, trn.type, data.EMPTY_SET, {deal_code}, 
