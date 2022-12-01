@@ -1,18 +1,9 @@
 """RU Tax Report extension for Fava.
 """
-import re
-import pprint
 import datetime
 
-from beancount.core.number import Decimal
-from beancount.core.number import ZERO
-from beancount.core import amount
-from beancount.core import convert
-
 from fava.ext import FavaExtensionBase
-from fava.helpers import FavaAPIException
-from fava.template_filters import cost_or_value
-
+from fava.context import g
 
 class ru_taxreport(FavaExtensionBase):  # pragma: no cover
     """Tax Base for traded assets
@@ -54,12 +45,12 @@ class ru_taxreport(FavaExtensionBase):  # pragma: no cover
         sql_fee = """SELECT last(balance) as fees WHERE year = {year} and account ~ "BrokerFees"
         """.format(year=self.config['report_year'])
         
-        contents, rtypes, rrows = self.ledger.query_shell.execute_query(sql_fee)
+        contents, rtypes, rrows = self.ledger.query_shell.execute_query(g.filtered.entries, sql_fee)
         broker_fee = rrows[0].fees.get_only_position().units.number
         del contents, rtypes, rrows
 
-        contents, rtypes, rrows = self.ledger.query_shell.execute_query(sql)
-        contents_cash, rtypes_cash, rrows_cash = self.ledger.query_shell.execute_query(sql_cash)
+        contents, rtypes, rrows = self.ledger.query_shell.execute_query(g.filtered.entries, sql)
+        contents_cash, rtypes_cash, rrows_cash = self.ledger.query_shell.execute_query(g.filtered.entries, sql_cash)
         # TODO: error check
         # rtypes, rrows = self.query_func(sql)
         # if not rtypes:

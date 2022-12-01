@@ -1,0 +1,105 @@
+<!-- {% import "_query_table.html" as querytable %} -->
+
+{% set year = extension.get_year() %}
+
+<h2>RU Tax Report for {{ year }}</h2>
+<br />
+
+
+{% set res, res_ldv, sum, sum_ldv, sum_total, totalsale, totalcost, fee = extension.build_tax_tables() %}
+
+{% if res or res_ldv %}
+
+{% block body %}
+
+<table>
+  <tr>
+    <td>ДОХОД ОТ РЕАЛИЗАЦИИ:</td> <td align="right">{{ totalsale }}</td>
+  </tr>
+  <tr>
+    <td>РАСХОДЫ ПО ПРИОБРЕТЕНИЮ:</td> <td align="right">{{ totalcost }}</td>
+  </tr>
+  <tr>
+    <td>КОМИССИИ БРОКЕРА:</td> <td align="right">{{ fee }}</td>
+  </tr>
+  <tr>
+    <td>ФИНРЕЗ с учетом ЛДВ:</td> <td align="right">{{ sum }}</td>
+  </tr>
+  <tr>
+    <td>ВЫЧЕТ по ЛДВ:</td> <td align="right">{{ sum_ldv }}</td>
+  </tr>
+  <tr>
+    <td>ВСЕГО ФИНРЕЗ:</td> <td align="right">{{ sum_total }}</td>
+  </tr>
+</table>
+
+<h2>LDV Transactions (more than 3 years)</h2>
+<table>
+  <thead>
+    <tr>
+      <th data-sort="string">Дата продажи</th>
+      <th data-sort="string">Дата приобретения</th>
+      <th data-sort="string">Лот</th>
+      <th data-sort="string">Количество бумаг</th>
+      <th data-sort="string">Биржевой тикер</th>
+      <th data-sort="string">Дней владения</th>
+      <th data-sort="string">Цена продажи</th>
+      <th data-sort="string">Цена покупки</th>
+      <th data-sort="string">Финрез</th>
+      <th data-sort="string">Доп. информация</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in res_ldv %}
+    <TR>
+      <TD>{{item.date}}</TD>
+      <TD>{{item.cost_date}}</TD>
+      <TD>{{item.position}}</TD>
+      <TD>{{item.position.units.number}}</TD>
+      <TD>{{item.position.units.currency}}</TD>
+      <TD>{{item.dff}}</TD>
+      <TD>{{item.price}}</TD>
+      <TD>{{item.cost}}</TD>
+      <TD>{{item.base}}</TD>
+      <TD>{{item.narration}}</TD>
+    </TR>
+    {% endfor %}
+  </tbody>
+</table>
+
+<h2>Included in Tax Base</h2>
+<table>
+  <thead>
+    <tr>
+      <th data-sort="string">Дата продажи</th>
+      <th data-sort="string">Лот</th>
+      <th data-sort="string">Количество</th>
+      <th data-sort="string">Дней владения</th>
+      <th data-sort="string">Цена продажи</th>
+      <th data-sort="string">Цена покупки</th>
+      <th data-sort="string">Финрез</th>
+      <th data-sort="string">Доп. информация</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for item in res %}
+    <TR>
+      <TD>{{item.date}}</TD>
+      <TD>{{item.position}}</TD>
+      <TD>{{item.position.units.number}}</TD>
+      <TD>{{item.dff}}</TD>
+      <TD>{{item.price}}</TD>
+      <TD>{{item.cost}}</TD>
+      <TD>{{item.base}}</TD>
+      <TD>{{item.narration}}</TD>
+    </TR>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}
+
+{% else %}
+
+No data - check filters!
+
+{% endif %}

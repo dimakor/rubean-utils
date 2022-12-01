@@ -1,0 +1,12 @@
+{% import "_query_table.html" as querytable with context %}
+
+{% set year = extension.get_year() %}
+
+<h2>RU Будущее ЛДВ</h2>
+
+<h2>ЛДВ уже достигнутое</h2>
+  {% set results = extension.build_ldv_table() %}
+  {{ querytable.querytable(ledger, None, *results[0]) }}
+
+  <h2>ЛДВ до {{ results[2] }}</h2>
+  {{ querytable.querytable(ledger, None, *results[1]) }}
