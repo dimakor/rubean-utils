@@ -143,8 +143,9 @@ class Importer(importer.ImporterProtocol):
                                             acc,
                                             amount.Amount(D(str(sheet.row(ii)[7].value)), balance_currency),
                                             None, None))
-            if (re.match(r'^Портфель по ценным бумагам и денежным средствам \(', sheet.row(ii)[1].value) and 
-                    sheet.row(ii)[6].value == 'на начало периода'):
+            if ((re.match(r'^Портфель по ценным бумагам и денежным средствам \(', sheet.row(ii)[1].value) or
+                    re.match(r'^Портфель по ценным бумагам, денежным средствам и ДМ \(', sheet.row(ii)[1].value))
+                    and sheet.row(ii)[6].value == 'на начало периода'):
                 sec_currency = re.search(r'\(.*\)', sheet.row(ii)[1].value)[0][1:-1]
                 ii += 2
                 while sheet.row(ii)[1].value == sec_currency:
@@ -207,9 +208,10 @@ class Importer(importer.ImporterProtocol):
             xfx = sheet.cell_xf_index(ii, 1)
             xf = book.xf_list[xfx]
             bgx = xf.background.pattern_colour_index
-            if bgx != 24:
+            if bgx not in [24, 27]:
                 ii +=1
                 continue
+            
             
             tt = sheet.row(ii-1)[1].value
             if tt[:11] == 'Валюта цены':
@@ -378,7 +380,7 @@ class Importer(importer.ImporterProtocol):
             xfx = sheet.cell_xf_index(ii, 1)
             xf = book.xf_list[xfx]
             bgx = xf.background.pattern_colour_index
-            if bgx != 24:
+            if bgx not in [24, 27]:
                 ii +=1
                 continue
             # Find section with stocks
