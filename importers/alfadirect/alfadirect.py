@@ -17,6 +17,7 @@ from beancount.core import position
 from beancount.ingest import importer
 from xlrd.biffh import XLRDError
 from xlrd.xldate import xldate_as_datetime
+from rich import print
 
 NOCOST = position.CostSpec(None, None, None, None, None, None)
 
@@ -135,7 +136,7 @@ class Importer(importer.ImporterProtocol):
         # 1. Load end of report balances: 'Динамика позиций' sheet
         sheet = workbook.sheet_by_name('Динамика позиций') #TODO change sheet to 0 (first sheet in workbook)
         # extract broker report dates - row 3 col 8
-        per = sheet.row(3)[8].value
+        per = sheet.row(4)[8].value
         self.stmt_begin = datetime.datetime.strptime(per[:10], '%d.%m.%Y').date()
         self.stmt_end = datetime.datetime.strptime(per[13:], '%d.%m.%Y').date()
         del sheet
@@ -234,7 +235,7 @@ class Importer(importer.ImporterProtocol):
         while sheet.row(ii)[jj].value != 'Дата\nрасчетов':
             jj += 1
         date_col = jj
-        while sheet.row(ii)[jj].value != '\nМесто\nзаключения\nсделки ⁵':
+        while '\nМесто\nзаключения\nсделки' not in sheet.row(ii)[jj].value:
             jj += 1
         market_col = jj
         while sheet.row(ii)[jj].value != 'ISIN/рег.код':
@@ -249,10 +250,10 @@ class Importer(importer.ImporterProtocol):
         while sheet.row(ii)[jj].value != 'Цена':
             jj += 1
         conv_col = jj
-        while sheet.row(ii)[jj].value != 'Сумма\nсделки⁶ ':
+        while 'Сумма\nсделки' not in sheet.row(ii)[jj].value:
             jj += 1
         price_col = jj
-        while sheet.row(ii)[jj].value != 'Вал.⁸':
+        while 'Вал.' not in sheet.row(ii)[jj].value:
             jj += 1
         cur_col = jj
 
