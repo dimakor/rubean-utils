@@ -99,6 +99,8 @@ class Importer(importer.ImporterProtocol):
                     line_count += 1
                 except IndexError:
                     break
+                except ValueError:
+                    continue
         self.isindb['US29355E2081'] = 'ENPLADR'
         self.isindb['JE00B5BCW814'] = 'RUAL'
 

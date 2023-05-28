@@ -129,3 +129,4 @@ dmypy.json
 .pyre/
 importers/alfadirect/vv.py
 importers/sber/procrep.py
+.vscode/settings.json
